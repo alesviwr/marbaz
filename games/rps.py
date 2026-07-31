@@ -2,131 +2,116 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
+import game_sessions as gs
 
+KIND = "rps"
 EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
 NAMES_FA = {"rock": "سنگ", "paper": "کاغذ", "scissors": "قیچی"}
 BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
 
-# key: (chat_id, message_id) -> session dict
-sessions = {}
-
-
-def _name(user):
-    return user.first_name or user.username or "بازیکن"
-
 
 async def rps_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
     user = update.effective_user
+    chat = update.effective_chat
     db.upsert_user(user.id, user.username, user.first_name)
 
-    challenged = None
-    if update.message.reply_to_message:
-        challenged = update.message.reply_to_message.from_user
-        if challenged.is_bot:
-            await update.message.reply_text("نمی‌تونی ربات رو چالش کنی 😅")
-            return
+    session = gs.create_game(KIND, user, chat.id, extra={"choices": {}})
+    link = f"https://t.me/{context.bot.username}?start=join_{KIND}_{session['id']}"
 
-    if challenged:
-        text = f"⚔️ {_name(user)} به {_name(challenged)} چالش سنگ‌کاغذقیچی داد!\n\nمنتظر پاسخ..."
-        keyboard = [[InlineKeyboardButton("✅ قبول چالش", callback_data="rps_accept")]]
-    else:
-        text = f"🎮 {_name(user)} یه بازی سنگ‌کاغذقیچی باز کرد!\n\nکی می‌خواد بازی کنه؟"
-        keyboard = [[InlineKeyboardButton("🤝 پیوستن به بازی", callback_data="rps_accept")]]
+    text = (
+        f"🎮 {session['players'][0]['name']} یه بازی سنگ‌کاغذقیچی ساخت!\n\n"
+        "این لینک رو برای دوستت بفرست تا بهت ملحق بشه 👇"
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دعوت به بازی", url=link)]])
+    msg = await update.message.reply_text(text, reply_markup=keyboard)
+    session["players"][0]["msg_id"] = msg.message_id
 
-    msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    sessions[(chat.id, msg.message_id)] = {
-        "p1": user.id, "p1_name": _name(user),
-        "p2": challenged.id if challenged else None,
-        "p2_name": _name(challenged) if challenged else None,
-        "choices": {}, "status": "waiting",
-    }
+
+async def rps_join(update: Update, context: ContextTypes.DEFAULT_TYPE, game_id: str):
+    user = update.effective_user
+    chat = update.effective_chat
+    session = gs.get_game(game_id)
+
+    if not session or session["kind"] != KIND:
+        await update.message.reply_text("این لینک بازی دیگه معتبر نیست یا منقضی شده.")
+        return
+    if session["status"] != "waiting":
+        await update.message.reply_text("این بازی از قبل شروع شده.")
+        return
+    if gs.find_player(session, user.id):
+        await update.message.reply_text("این لینک بازی خودته! باید برای دوستت بفرستیش.")
+        return
+
+    db.upsert_user(user.id, user.username, user.first_name)
+    session["players"].append({
+        "user_id": user.id,
+        "name": user.first_name or user.username or "بازیکن",
+        "chat_id": chat.id,
+        "msg_id": None,
+    })
+    session["status"] = "playing"
+
+    p1, p2 = session["players"]
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_pick_{game_id}_rock"),
+        InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick_{game_id}_paper"),
+        InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick_{game_id}_scissors"),
+    ]])
+
+    def render(p):
+        text = f"🎮 {p1['name']} 🆚 {p2['name']}\n\nانتخابتو بزن — فقط خودت می‌بینیش 👇"
+        return text, keyboard
+
+    await gs.broadcast_custom(context.bot, session, render)
 
 
 async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-    key = (chat_id, msg_id)
-    session = sessions.get(key)
+    data = query.data  # rps_pick_<game_id>_<choice>
+    _, _, game_id, choice = data.split("_")
+
+    session = gs.get_game(game_id)
     if not session:
         await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
         return
 
     user = query.from_user
-    data = query.data
-
-    if data == "rps_accept":
-        if session["status"] != "waiting":
-            await query.answer("بازی از قبل شروع شده.", show_alert=True)
-            return
-        if user.id == session["p1"]:
-            await query.answer("نمی‌تونی با خودت بازی کنی! منتظر حریف باش.", show_alert=True)
-            return
-        if session["p2"] and user.id != session["p2"]:
-            await query.answer("این چالش برای شما نیست.", show_alert=True)
-            return
-
-        db.upsert_user(user.id, user.username, user.first_name)
-        session["p2"] = user.id
-        session["p2_name"] = _name(user)
-        session["status"] = "playing"
-
-        keyboard = [[
-            InlineKeyboardButton("🪨 سنگ", callback_data="rps_rock"),
-            InlineKeyboardButton("📄 کاغذ", callback_data="rps_paper"),
-            InlineKeyboardButton("✂️ قیچی", callback_data="rps_scissors"),
-        ]]
-        text = (
-            f"🎮 {session['p1_name']} 🆚 {session['p2_name']}\n\n"
-            "هر دو نفر، انتخابتون رو با دکمه زیر مخفیانه انجام بدید 👇"
-        )
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        await query.answer("بازی شروع شد!")
+    player = gs.find_player(session, user.id)
+    if not player:
+        await query.answer("شما بازیکن این بازی نیستید.", show_alert=True)
+        return
+    if session["status"] != "playing":
+        await query.answer("بازی هنوز شروع نشده.", show_alert=True)
+        return
+    if user.id in session["choices"]:
+        await query.answer(f"انتخاب قبلی شما: {NAMES_FA[session['choices'][user.id]]}", show_alert=True)
         return
 
-    if data in ("rps_rock", "rps_paper", "rps_scissors"):
-        choice = data.replace("rps_", "")
-        if user.id not in (session["p1"], session["p2"]):
-            await query.answer("شما بازیکن این راند نیستید.", show_alert=True)
-            return
-        if session["status"] != "playing":
-            await query.answer("بازی هنوز شروع نشده.", show_alert=True)
-            return
-        if user.id in session["choices"]:
-            await query.answer(
-                f"انتخاب قبلی شما: {NAMES_FA[session['choices'][user.id]]}", show_alert=True
-            )
-            return
+    session["choices"][user.id] = choice
+    await query.answer(f"انتخاب شما: {NAMES_FA[choice]} ✅", show_alert=True)
 
-        session["choices"][user.id] = choice
-        await query.answer(
-            f"انتخاب شما: {NAMES_FA[choice]} ✅ (تا حریف انتخاب نکنه مخفی می‌مونه)",
-            show_alert=True,
+    if len(session["choices"]) == 2:
+        p1, p2 = session["players"]
+        c1, c2 = session["choices"][p1["user_id"]], session["choices"][p2["user_id"]]
+
+        if c1 == c2:
+            result = "🤝 مساوی شد!"
+            db.record_result(p1["user_id"], KIND, "draw")
+            db.record_result(p2["user_id"], KIND, "draw")
+        elif BEATS[c1] == c2:
+            result = f"🏆 {p1['name']} برنده شد!"
+            db.record_result(p1["user_id"], KIND, "win")
+            db.record_result(p2["user_id"], KIND, "loss")
+        else:
+            result = f"🏆 {p2['name']} برنده شد!"
+            db.record_result(p2["user_id"], KIND, "win")
+            db.record_result(p1["user_id"], KIND, "loss")
+
+        text = (
+            f"🎮 {p1['name']} 🆚 {p2['name']}\n\n"
+            f"{p1['name']}: {EMOJI[c1]} {NAMES_FA[c1]}\n"
+            f"{p2['name']}: {EMOJI[c2]} {NAMES_FA[c2]}\n\n"
+            f"{result}"
         )
-
-        if len(session["choices"]) == 2:
-            c1 = session["choices"][session["p1"]]
-            c2 = session["choices"][session["p2"]]
-
-            if c1 == c2:
-                result_text = "🤝 مساوی شد!"
-                db.record_result(session["p1"], "rps", "draw")
-                db.record_result(session["p2"], "rps", "draw")
-            elif BEATS[c1] == c2:
-                result_text = f"🏆 {session['p1_name']} برنده شد!"
-                db.record_result(session["p1"], "rps", "win")
-                db.record_result(session["p2"], "rps", "loss")
-            else:
-                result_text = f"🏆 {session['p2_name']} برنده شد!"
-                db.record_result(session["p2"], "rps", "win")
-                db.record_result(session["p1"], "rps", "loss")
-
-            text = (
-                f"🎮 {session['p1_name']} 🆚 {session['p2_name']}\n\n"
-                f"{session['p1_name']}: {EMOJI[c1]} {NAMES_FA[c1]}\n"
-                f"{session['p2_name']}: {EMOJI[c2]} {NAMES_FA[c2]}\n\n"
-                f"{result_text}"
-            )
-            await query.edit_message_text(text)
-            del sessions[key]
+        await gs.broadcast_custom(context.bot, session, lambda p: (text, None))
+        gs.remove_game(game_id)

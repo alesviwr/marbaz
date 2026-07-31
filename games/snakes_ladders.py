@@ -4,8 +4,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
+import game_sessions as gs
 
-sessions = {}
+KIND = "sl"
 MAX_PLAYERS = 4
 PLAYER_EMOJIS = ["🔵", "🔴", "🟢", "🟡"]
 
@@ -13,11 +14,8 @@ SNAKES = {16: 6, 47: 26, 49: 11, 56: 53, 62: 19, 64: 60, 87: 24, 93: 73, 95: 75,
 LADDERS = {1: 38, 4: 14, 9: 31, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 80: 100}
 
 
-def _name(user):
-    return user.first_name or user.username or "بازیکن"
-
-
 def _board_text(session):
+    positions = session["positions"]
     lines = []
     for row in range(9, -1, -1):
         nums = range(row * 10 + 1, row * 10 + 11)
@@ -25,8 +23,8 @@ def _board_text(session):
         cells = []
         for n in nums:
             marker = None
-            for i, p in enumerate(session["order"]):
-                if session["positions"][p] == n:
+            for i, p in enumerate(session["players"]):
+                if positions[p["user_id"]] == n:
                     marker = PLAYER_EMOJIS[i]
             if marker:
                 cells.append(marker)
@@ -42,8 +40,9 @@ def _board_text(session):
 
 def _players_text(session):
     lines = []
-    for i, p in enumerate(session["order"]):
-        lines.append(f"{PLAYER_EMOJIS[i]} {session['names'][p]} — خونه {session['positions'][p]}")
+    for i, p in enumerate(session["players"]):
+        pos = session["positions"].get(p["user_id"], 0)
+        lines.append(f"{PLAYER_EMOJIS[i]} {p['name']} — خونه {pos}")
     return "\n".join(lines)
 
 
@@ -51,99 +50,123 @@ def _lobby_text(session):
     return (
         "🐍🪜 بازی مار و پله راه افتاد!\n\n"
         f"{_players_text(session)}\n\n"
-        "بازیکنای بیشتر بپیوندن یا سازنده بازی رو شروع کنه (حداقل ۲ نفر لازمه)."
+        "بازیکنای بیشتر با لینک بپیوندن، یا سازنده بازی رو شروع کنه (حداقل ۲ نفر لازمه)."
     )
 
 
-def _lobby_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤝 پیوستن", callback_data="sl_join")],
-        [InlineKeyboardButton("▶️ شروع بازی", callback_data="sl_begin")],
-    ])
+def _lobby_keyboard(session, game_id, is_host):
+    rows = [[InlineKeyboardButton("🔗 دعوت به بازی", url=session["invite_link"])]]
+    if is_host:
+        rows.append([InlineKeyboardButton("▶️ شروع بازی", callback_data=f"sl_begin_{game_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def sl_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
     user = update.effective_user
+    chat = update.effective_chat
     db.upsert_user(user.id, user.username, user.first_name)
 
-    session = {
-        "order": [user.id],
-        "names": {user.id: _name(user)},
-        "positions": {user.id: 0},
-        "status": "lobby",
-        "turn_idx": 0,
-        "host": user.id,
-    }
-    msg = await update.message.reply_text(_lobby_text(session), reply_markup=_lobby_keyboard())
-    sessions[(chat.id, msg.message_id)] = session
+    session = gs.create_game(KIND, user, chat.id, extra={"positions": {user.id: 0}, "turn_idx": 0})
+    link = f"https://t.me/{context.bot.username}?start=join_{KIND}_{session['id']}"
+    session["invite_link"] = link
+
+    text = _lobby_text(session)
+    msg = await update.message.reply_text(
+        text, reply_markup=_lobby_keyboard(session, session["id"], True)
+    )
+    session["players"][0]["msg_id"] = msg.message_id
 
 
-async def _render_turn(query, session, extra_note=""):
-    current = session["order"][session["turn_idx"]]
+async def sl_join(update: Update, context: ContextTypes.DEFAULT_TYPE, game_id: str):
+    user = update.effective_user
+    chat = update.effective_chat
+    session = gs.get_game(game_id)
+
+    if not session or session["kind"] != KIND:
+        await update.message.reply_text("این لینک بازی دیگه معتبر نیست یا منقضی شده.")
+        return
+    if session["status"] != "waiting":
+        await update.message.reply_text("این بازی از قبل شروع شده.")
+        return
+    if gs.find_player(session, user.id):
+        await update.message.reply_text("شما از قبل تو این بازی هستید.")
+        return
+    if len(session["players"]) >= MAX_PLAYERS:
+        await update.message.reply_text("ظرفیت این بازی تکمیله (حداکثر ۴ نفر).")
+        return
+
+    db.upsert_user(user.id, user.username, user.first_name)
+    session["players"].append({
+        "user_id": user.id,
+        "name": user.first_name or user.username or "بازیکن",
+        "chat_id": chat.id,
+        "msg_id": None,
+    })
+    session["positions"][user.id] = 0
+
+    host_id = session["players"][0]["user_id"]
+
+    def render(p):
+        return _lobby_text(session), _lobby_keyboard(session, game_id, p["user_id"] == host_id)
+
+    await gs.broadcast_custom(context.bot, session, render)
+
+
+async def _render_turn(bot, session, game_id, extra_note=""):
+    current_id = session["players"][session["turn_idx"]]["user_id"]
+    current_name = gs.find_player(session, current_id)["name"]
     note_block = f"{extra_note}\n\n" if extra_note else ""
     text = (
         f"🐍🪜 بازی مار و پله\n\n{_board_text(session)}\n\n{_players_text(session)}\n\n"
-        f"{note_block}نوبت: {session['names'][current]}"
+        f"{note_block}نوبت: {current_name}"
     )
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب تاس", callback_data="sl_roll")]])
-    await query.edit_message_text(text, reply_markup=keyboard)
+
+    def render(p):
+        if p["user_id"] == current_id:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب تاس", callback_data=f"sl_roll_{game_id}")]])
+        else:
+            kb = None
+        return text, kb
+
+    await gs.broadcast_custom(bot, session, render)
 
 
 async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-    key = (chat_id, msg_id)
-    session = sessions.get(key)
-    if not session:
-        await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
-        return
-
-    user = query.from_user
     data = query.data
+    user = query.from_user
 
-    if data == "sl_join":
-        if session["status"] != "lobby":
-            await query.answer("بازی شروع شده.", show_alert=True)
+    if data.startswith("sl_begin_"):
+        game_id = data[len("sl_begin_"):]
+        session = gs.get_game(game_id)
+        if not session:
+            await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
             return
-        if user.id in session["order"]:
-            await query.answer("شما از قبل تو بازی هستید.", show_alert=True)
-            return
-        if len(session["order"]) >= MAX_PLAYERS:
-            await query.answer("ظرفیت بازی تکمیله.", show_alert=True)
-            return
-
-        db.upsert_user(user.id, user.username, user.first_name)
-        session["order"].append(user.id)
-        session["names"][user.id] = _name(user)
-        session["positions"][user.id] = 0
-        await query.answer("پیوستید به بازی!")
-        await query.edit_message_text(_lobby_text(session), reply_markup=_lobby_keyboard())
-        return
-
-    if data == "sl_begin":
-        if user.id != session["host"]:
+        host_id = session["players"][0]["user_id"]
+        if user.id != host_id:
             await query.answer("فقط سازنده بازی می‌تونه شروع کنه.", show_alert=True)
             return
-        if session["status"] != "lobby":
+        if session["status"] != "waiting":
             await query.answer("بازی از قبل شروع شده.", show_alert=True)
             return
-        if len(session["order"]) < 2:
+        if len(session["players"]) < 2:
             await query.answer("حداقل ۲ بازیکن لازمه.", show_alert=True)
             return
 
         session["status"] = "playing"
         await query.answer("بازی شروع شد!")
-        await _render_turn(query, session)
+        await _render_turn(context.bot, session, game_id)
         return
 
-    if data == "sl_roll":
-        if session["status"] != "playing":
-            await query.answer("بازی هنوز شروع نشده.", show_alert=True)
+    if data.startswith("sl_roll_"):
+        game_id = data[len("sl_roll_"):]
+        session = gs.get_game(game_id)
+        if not session:
+            await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
             return
-        current = session["order"][session["turn_idx"]]
-        if user.id != current:
+
+        current_id = session["players"][session["turn_idx"]]["user_id"]
+        if user.id != current_id:
             await query.answer("نوبت شما نیست!", show_alert=True)
             return
 
@@ -165,19 +188,19 @@ async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = f"🎲 {dice} آوردید و رفتید خونه {pos}."
 
         session["positions"][user.id] = pos
+        await query.answer(note[:200])
 
         if pos == 100:
-            for p in session["order"]:
-                db.record_result(p, "sl", "win" if p == user.id else "loss")
+            for p in session["players"]:
+                db.record_result(p["user_id"], KIND, "win" if p["user_id"] == user.id else "loss")
+            winner_name = gs.find_player(session, user.id)["name"]
             text = (
                 f"🐍🪜 بازی مار و پله\n\n{_board_text(session)}\n\n{_players_text(session)}\n\n"
-                f"{note}\n\n🏆 {session['names'][user.id]} برنده شد و به خونه ۱۰۰ رسید!"
+                f"{note}\n\n🏆 {winner_name} برنده شد و به خونه ۱۰۰ رسید!"
             )
-            await query.answer(note[:200])
-            await query.edit_message_text(text)
-            del sessions[key]
+            await gs.broadcast_custom(context.bot, session, lambda p: (text, None))
+            gs.remove_game(game_id)
             return
 
-        session["turn_idx"] = (session["turn_idx"] + 1) % len(session["order"])
-        await query.answer(note[:200])
-        await _render_turn(query, session, extra_note=note)
+        session["turn_idx"] = (session["turn_idx"] + 1) % len(session["players"])
+        await _render_turn(context.bot, session, game_id, extra_note=note)

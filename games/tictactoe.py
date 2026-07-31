@@ -2,10 +2,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
+import game_sessions as gs
 
-sessions = {}
+KIND = "ttt"
 MARKS = {"X": "❌", "O": "⭕"}
-
 WIN_LINES = [
     (0, 1, 2), (3, 4, 5), (6, 7, 8),
     (0, 3, 6), (1, 4, 7), (2, 5, 8),
@@ -13,11 +13,15 @@ WIN_LINES = [
 ]
 
 
-def _name(user):
-    return user.first_name or user.username or "بازیکن"
+def _check_win(board):
+    for a, b, c in WIN_LINES:
+        if board[a] and board[a] == board[b] == board[c]:
+            return True
+    return False
 
 
-def _render_keyboard(board, active):
+def _keyboard(session, game_id, active):
+    board = session["board"]
     rows = []
     for r in range(3):
         row = []
@@ -25,133 +29,121 @@ def _render_keyboard(board, active):
             i = r * 3 + c
             val = board[i]
             label = MARKS[val] if val else "➖"
-            cb = f"ttt_{i}" if (active and not val) else "ttt_noop"
+            cb = f"ttt_pick_{game_id}_{i}" if (active and not val) else "ttt_noop"
             row.append(InlineKeyboardButton(label, callback_data=cb))
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
 
 def _status_text(session):
-    turn_name = session["p1_name"] if session["turn"] == session["p1"] else session["p2_name"]
-    return (
-        f"❌ {session['p1_name']}   🆚   ⭕ {session['p2_name']}\n\n"
-        f"نوبت: {turn_name}"
-    )
-
-
-def _check_win(board):
-    for line in WIN_LINES:
-        a, b, c = line
-        if board[a] and board[a] == board[b] == board[c]:
-            return line
-    return None
+    p1, p2 = session["players"]
+    turn_name = p1["name"] if session["turn"] == p1["user_id"] else p2["name"]
+    return f"❌ {p1['name']}   🆚   ⭕ {p2['name']}\n\nنوبت: {turn_name}"
 
 
 async def ttt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
     user = update.effective_user
+    chat = update.effective_chat
     db.upsert_user(user.id, user.username, user.first_name)
 
-    challenged = None
-    if update.message.reply_to_message:
-        challenged = update.message.reply_to_message.from_user
-        if challenged.is_bot:
-            await update.message.reply_text("نمی‌تونی ربات رو چالش کنی 😅")
-            return
+    session = gs.create_game(
+        KIND, user, chat.id,
+        extra={"board": [None] * 9, "turn": None, "mark": {user.id: "X"}},
+    )
+    link = f"https://t.me/{context.bot.username}?start=join_{KIND}_{session['id']}"
+    text = f"⭕❌ {session['players'][0]['name']} یه بازی دوز ساخت!\n\nاین لینک رو برای دوستت بفرست تا بهت ملحق بشه 👇"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دعوت به بازی", url=link)]])
+    msg = await update.message.reply_text(text, reply_markup=keyboard)
+    session["players"][0]["msg_id"] = msg.message_id
 
-    if challenged:
-        text = f"⭕❌ {_name(user)} به {_name(challenged)} چالش دوز داد!"
-        keyboard = [[InlineKeyboardButton("✅ قبول چالش", callback_data="ttt_accept")]]
-    else:
-        text = f"⭕❌ {_name(user)} یه بازی دوز باز کرد. کی بازی می‌کنه؟"
-        keyboard = [[InlineKeyboardButton("🤝 پیوستن", callback_data="ttt_accept")]]
 
-    msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    sessions[(chat.id, msg.message_id)] = {
-        "p1": user.id, "p1_name": _name(user), "mark1": "X",
-        "p2": challenged.id if challenged else None,
-        "p2_name": _name(challenged) if challenged else None, "mark2": "O",
-        "board": [None] * 9, "turn": None, "status": "waiting",
-    }
+async def ttt_join(update: Update, context: ContextTypes.DEFAULT_TYPE, game_id: str):
+    user = update.effective_user
+    chat = update.effective_chat
+    session = gs.get_game(game_id)
+
+    if not session or session["kind"] != KIND:
+        await update.message.reply_text("این لینک بازی دیگه معتبر نیست یا منقضی شده.")
+        return
+    if session["status"] != "waiting":
+        await update.message.reply_text("این بازی از قبل شروع شده.")
+        return
+    if gs.find_player(session, user.id):
+        await update.message.reply_text("این لینک بازی خودته! باید برای دوستت بفرستیش.")
+        return
+
+    db.upsert_user(user.id, user.username, user.first_name)
+    session["players"].append({
+        "user_id": user.id,
+        "name": user.first_name or user.username or "بازیکن",
+        "chat_id": chat.id,
+        "msg_id": None,
+    })
+    session["mark"][user.id] = "O"
+    session["turn"] = session["players"][0]["user_id"]
+    session["status"] = "playing"
+
+    def render(p):
+        active = p["user_id"] == session["turn"]
+        return _status_text(session), _keyboard(session, game_id, active)
+
+    await gs.broadcast_custom(context.bot, session, render)
 
 
 async def ttt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-    key = (chat_id, msg_id)
-    session = sessions.get(key)
-    if not session:
-        await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
-        return
-
-    user = query.from_user
     data = query.data
-
-    if data == "ttt_accept":
-        if session["status"] != "waiting":
-            await query.answer("بازی شروع شده.", show_alert=True)
-            return
-        if user.id == session["p1"]:
-            await query.answer("منتظر حریف باش.", show_alert=True)
-            return
-        if session["p2"] and user.id != session["p2"]:
-            await query.answer("این چالش برای شما نیست.", show_alert=True)
-            return
-
-        db.upsert_user(user.id, user.username, user.first_name)
-        session["p2"] = user.id
-        session["p2_name"] = _name(user)
-        session["status"] = "playing"
-        session["turn"] = session["p1"]
-
-        await query.edit_message_text(
-            _status_text(session), reply_markup=_render_keyboard(session["board"], True)
-        )
-        await query.answer("بازی شروع شد!")
-        return
 
     if data == "ttt_noop":
         await query.answer()
         return
 
-    if data.startswith("ttt_"):
-        if session["status"] != "playing":
-            await query.answer("بازی هنوز شروع نشده.", show_alert=True)
-            return
-        if user.id != session["turn"]:
-            await query.answer("نوبت شما نیست!", show_alert=True)
-            return
+    _, _, game_id, idx = data.split("_")
+    idx = int(idx)
+    session = gs.get_game(game_id)
+    if not session:
+        await query.answer("این بازی دیگه فعال نیست.", show_alert=True)
+        return
 
-        idx = int(data.replace("ttt_", ""))
-        if session["board"][idx]:
-            await query.answer("این خونه پره!", show_alert=True)
-            return
+    user = query.from_user
+    if not gs.find_player(session, user.id):
+        await query.answer("شما بازیکن این بازی نیستید.", show_alert=True)
+        return
+    if user.id != session["turn"]:
+        await query.answer("نوبت شما نیست!", show_alert=True)
+        return
+    if session["board"][idx]:
+        await query.answer("این خونه پره!", show_alert=True)
+        return
 
-        mark = session["mark1"] if user.id == session["p1"] else session["mark2"]
-        session["board"][idx] = mark
-        await query.answer()
+    mark = session["mark"][user.id]
+    session["board"][idx] = mark
+    await query.answer()
 
-        if _check_win(session["board"]):
-            winner_id = session["p1"] if mark == session["mark1"] else session["p2"]
-            loser_id = session["p2"] if winner_id == session["p1"] else session["p1"]
-            db.record_result(winner_id, "ttt", "win")
-            db.record_result(loser_id, "ttt", "loss")
-            winner_name = session["p1_name"] if winner_id == session["p1"] else session["p2_name"]
-            text = _status_text(session) + f"\n\n🏆 {winner_name} برد!"
-            await query.edit_message_text(text, reply_markup=_render_keyboard(session["board"], False))
-            del sessions[key]
-            return
+    p1, p2 = session["players"]
 
-        if all(session["board"]):
-            db.record_result(session["p1"], "ttt", "draw")
-            db.record_result(session["p2"], "ttt", "draw")
-            text = _status_text(session) + "\n\n🤝 مساوی شد!"
-            await query.edit_message_text(text, reply_markup=_render_keyboard(session["board"], False))
-            del sessions[key]
-            return
+    if _check_win(session["board"]):
+        winner = gs.find_player(session, user.id)
+        loser = p2 if winner["user_id"] == p1["user_id"] else p1
+        db.record_result(winner["user_id"], KIND, "win")
+        db.record_result(loser["user_id"], KIND, "loss")
+        text = _status_text(session) + f"\n\n🏆 {winner['name']} برد!"
+        await gs.broadcast_custom(context.bot, session, lambda p: (text, _keyboard(session, game_id, False)))
+        gs.remove_game(game_id)
+        return
 
-        session["turn"] = session["p2"] if session["turn"] == session["p1"] else session["p1"]
-        await query.edit_message_text(
-            _status_text(session), reply_markup=_render_keyboard(session["board"], True)
-        )
+    if all(session["board"]):
+        db.record_result(p1["user_id"], KIND, "draw")
+        db.record_result(p2["user_id"], KIND, "draw")
+        text = _status_text(session) + "\n\n🤝 مساوی شد!"
+        await gs.broadcast_custom(context.bot, session, lambda p: (text, _keyboard(session, game_id, False)))
+        gs.remove_game(game_id)
+        return
+
+    session["turn"] = p2["user_id"] if session["turn"] == p1["user_id"] else p1["user_id"]
+
+    def render(p):
+        active = p["user_id"] == session["turn"]
+        return _status_text(session), _keyboard(session, game_id, active)
+
+    await gs.broadcast_custom(context.bot, session, render)

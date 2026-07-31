@@ -72,6 +72,14 @@ def get_stats(user_id, game=None):
         return [dict(r) for r in rows]
 
 
+def get_all_users():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT user_id, username, first_name FROM users ORDER BY user_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_leaderboard(game, limit=10):
     with get_db() as conn:
         rows = conn.execute("""
