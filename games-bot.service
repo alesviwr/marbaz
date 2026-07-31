@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram Games Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+WorkingDirectory=/path/to/telegram-games-bot
+ExecStart=/path/to/telegram-games-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
