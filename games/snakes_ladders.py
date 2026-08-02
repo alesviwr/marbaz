@@ -5,44 +5,20 @@ from telegram.ext import ContextTypes
 
 import database as db
 import game_sessions as gs
+import board_images as bi
 
 KIND = "sl"
 MAX_PLAYERS = 4
-PLAYER_EMOJIS = ["🔵", "🔴", "🟢", "🟡"]
 
 SNAKES = {16: 6, 47: 26, 49: 11, 56: 53, 62: 19, 64: 60, 87: 24, 93: 73, 95: 75, 98: 78}
 LADDERS = {1: 38, 4: 14, 9: 31, 21: 42, 28: 84, 36: 44, 51: 67, 71: 91, 80: 100}
 
 
-def _board_text(session):
-    positions = session["positions"]
-    lines = []
-    for row in range(9, -1, -1):
-        nums = range(row * 10 + 1, row * 10 + 11)
-        nums = list(nums) if row % 2 == 0 else list(reversed(list(nums)))
-        cells = []
-        for n in nums:
-            marker = None
-            for i, p in enumerate(session["players"]):
-                if positions[p["user_id"]] == n:
-                    marker = PLAYER_EMOJIS[i]
-            if marker:
-                cells.append(marker)
-            elif n in SNAKES:
-                cells.append("🐍")
-            elif n in LADDERS:
-                cells.append("🪜")
-            else:
-                cells.append("▫️")
-        lines.append("".join(cells))
-    return "\n".join(lines)
-
-
 def _players_text(session):
     lines = []
-    for i, p in enumerate(session["players"]):
+    for p in session["players"]:
         pos = session["positions"].get(p["user_id"], 0)
-        lines.append(f"{PLAYER_EMOJIS[i]} {p['name']} — خونه {pos}")
+        lines.append(f"{p['name']} — خونه {pos}")
     return "\n".join(lines)
 
 
@@ -70,9 +46,8 @@ async def sl_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/{context.bot.username}?start=join_{KIND}_{session['id']}"
     session["invite_link"] = link
 
-    text = _lobby_text(session)
     msg = await update.message.reply_text(
-        text, reply_markup=_lobby_keyboard(session, session["id"], True)
+        _lobby_text(session), reply_markup=_lobby_keyboard(session, session["id"], True)
     )
     session["players"][0]["msg_id"] = msg.message_id
 
@@ -112,23 +87,26 @@ async def sl_join(update: Update, context: ContextTypes.DEFAULT_TYPE, game_id: s
     await gs.broadcast_custom(context.bot, session, render)
 
 
+def _board_image(session):
+    positions = [session["positions"][p["user_id"]] for p in session["players"]]
+    return bi.render_snakes_ladders(positions, SNAKES, LADDERS)
+
+
 async def _render_turn(bot, session, game_id, extra_note=""):
     current_id = session["players"][session["turn_idx"]]["user_id"]
     current_name = gs.find_player(session, current_id)["name"]
     note_block = f"{extra_note}\n\n" if extra_note else ""
-    text = (
-        f"🐍🪜 بازی مار و پله\n\n{_board_text(session)}\n\n{_players_text(session)}\n\n"
-        f"{note_block}نوبت: {current_name}"
-    )
+    caption = f"🐍🪜 {_players_text(session)}\n\n{note_block}نوبت: {current_name}"
 
     def render(p):
+        img = _board_image(session)
         if p["user_id"] == current_id:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب تاس", callback_data=f"sl_roll_{game_id}")]])
         else:
             kb = None
-        return text, kb
+        return img, caption, kb
 
-    await gs.broadcast_custom(bot, session, render)
+    await gs.broadcast_photo(bot, session, render)
 
 
 async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,11 +156,11 @@ async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = f"🎲 {dice} آوردید ولی جا نیست، سر جاتون موندید."
         elif pos in SNAKES:
             new_pos = SNAKES[pos]
-            note = f"🎲 {dice} آوردید، رفتید خونه {pos}... 🐍 مار گازتون گرفت و افتادید خونه {new_pos}!"
+            note = f"🎲 {dice} آوردید، رفتید خونه {pos}... 🐍 مار گازتون گرفت، افتادید خونه {new_pos}!"
             pos = new_pos
         elif pos in LADDERS:
             new_pos = LADDERS[pos]
-            note = f"🎲 {dice} آوردید، رفتید خونه {pos}... 🪜 از نردبون رفتید بالا تا خونه {new_pos}!"
+            note = f"🎲 {dice} آوردید، رفتید خونه {pos}... 🪜 از نردبون رفتید بالا، خونه {new_pos}!"
             pos = new_pos
         else:
             note = f"🎲 {dice} آوردید و رفتید خونه {pos}."
@@ -194,11 +172,12 @@ async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for p in session["players"]:
                 db.record_result(p["user_id"], KIND, "win" if p["user_id"] == user.id else "loss")
             winner_name = gs.find_player(session, user.id)["name"]
-            text = (
-                f"🐍🪜 بازی مار و پله\n\n{_board_text(session)}\n\n{_players_text(session)}\n\n"
-                f"{note}\n\n🏆 {winner_name} برنده شد و به خونه ۱۰۰ رسید!"
-            )
-            await gs.broadcast_custom(context.bot, session, lambda p: (text, None))
+            caption = f"🐍🪜 {_players_text(session)}\n\n{note}\n\n🏆 {winner_name} برنده شد و به خونه ۱۰۰ رسید!"
+
+            def render(p):
+                return _board_image(session), caption, None
+
+            await gs.broadcast_photo(context.bot, session, render)
             gs.remove_game(game_id)
             return
 

@@ -8,6 +8,20 @@ KIND = "rps"
 EMOJI = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
 NAMES_FA = {"rock": "سنگ", "paper": "کاغذ", "scissors": "قیچی"}
 BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+TOTAL_ROUNDS = 3
+
+PICK_KEYBOARD_TEMPLATE = lambda game_id: InlineKeyboardMarkup([[
+    InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_pick_{game_id}_rock"),
+    InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick_{game_id}_paper"),
+    InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick_{game_id}_scissors"),
+]])
+
+
+def _score_line(session):
+    p1, p2 = session["players"]
+    s1 = session["scores"][p1["user_id"]]
+    s2 = session["scores"][p2["user_id"]]
+    return f"امتیاز: {p1['name']} {s1} — {s2} {p2['name']}"
 
 
 async def rps_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -15,11 +29,14 @@ async def rps_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     db.upsert_user(user.id, user.username, user.first_name)
 
-    session = gs.create_game(KIND, user, chat.id, extra={"choices": {}})
+    session = gs.create_game(
+        KIND, user, chat.id,
+        extra={"choices": {}, "round": 1, "scores": {user.id: 0}},
+    )
     link = f"https://t.me/{context.bot.username}?start=join_{KIND}_{session['id']}"
 
     text = (
-        f"🎮 {session['players'][0]['name']} یه بازی سنگ‌کاغذقیچی ساخت!\n\n"
+        f"🎮 {session['players'][0]['name']} یه بازی سنگ‌کاغذقیچی ساخت (۳ دست)!\n\n"
         "این لینک رو برای دوستت بفرست تا بهت ملحق بشه 👇"
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دعوت به بازی", url=link)]])
@@ -49,17 +66,18 @@ async def rps_join(update: Update, context: ContextTypes.DEFAULT_TYPE, game_id: 
         "chat_id": chat.id,
         "msg_id": None,
     })
+    session["scores"][user.id] = 0
     session["status"] = "playing"
 
     p1, p2 = session["players"]
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_pick_{game_id}_rock"),
-        InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_pick_{game_id}_paper"),
-        InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_pick_{game_id}_scissors"),
-    ]])
+    keyboard = PICK_KEYBOARD_TEMPLATE(game_id)
 
     def render(p):
-        text = f"🎮 {p1['name']} 🆚 {p2['name']}\n\nانتخابتو بزن — فقط خودت می‌بینیش 👇"
+        text = (
+            f"🎮 {p1['name']} 🆚 {p2['name']} — دست {session['round']} از {TOTAL_ROUNDS}\n"
+            f"{_score_line(session)}\n\n"
+            "انتخابتو بزن — فقط خودت می‌بینیش 👇"
+        )
         return text, keyboard
 
     await gs.broadcast_custom(context.bot, session, render)
@@ -76,8 +94,7 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user = query.from_user
-    player = gs.find_player(session, user.id)
-    if not player:
+    if not gs.find_player(session, user.id):
         await query.answer("شما بازیکن این بازی نیستید.", show_alert=True)
         return
     if session["status"] != "playing":
@@ -90,28 +107,57 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["choices"][user.id] = choice
     await query.answer(f"انتخاب شما: {NAMES_FA[choice]} ✅", show_alert=True)
 
-    if len(session["choices"]) == 2:
-        p1, p2 = session["players"]
-        c1, c2 = session["choices"][p1["user_id"]], session["choices"][p2["user_id"]]
+    if len(session["choices"]) < 2:
+        return
 
-        if c1 == c2:
-            result = "🤝 مساوی شد!"
+    p1, p2 = session["players"]
+    c1, c2 = session["choices"][p1["user_id"]], session["choices"][p2["user_id"]]
+
+    if c1 == c2:
+        round_result = "🤝 این دست مساوی شد."
+    elif BEATS[c1] == c2:
+        round_result = f"🏆 {p1['name']} این دست رو برد."
+        session["scores"][p1["user_id"]] += 1
+    else:
+        round_result = f"🏆 {p2['name']} این دست رو برد."
+        session["scores"][p2["user_id"]] += 1
+
+    round_summary = (
+        f"دست {session['round']} از {TOTAL_ROUNDS}\n"
+        f"{p1['name']}: {EMOJI[c1]} {NAMES_FA[c1]}\n"
+        f"{p2['name']}: {EMOJI[c2]} {NAMES_FA[c2]}\n\n"
+        f"{round_result}\n{_score_line(session)}"
+    )
+
+    if session["round"] >= TOTAL_ROUNDS:
+        s1, s2 = session["scores"][p1["user_id"]], session["scores"][p2["user_id"]]
+        if s1 == s2:
+            final_line = "🤝 نتیجه‌ی نهایی بازی مساویه!"
+        else:
+            winner_name = p1["name"] if s1 > s2 else p2["name"]
+            final_line = f"🏆🏆 {winner_name} برنده‌ی نهایی بازیه!"
+            winner_id = p1["user_id"] if s1 > s2 else p2["user_id"]
+            loser_id = p2["user_id"] if s1 > s2 else p1["user_id"]
+            db.record_result(winner_id, KIND, "win")
+            db.record_result(loser_id, KIND, "loss")
+        if s1 == s2:
             db.record_result(p1["user_id"], KIND, "draw")
             db.record_result(p2["user_id"], KIND, "draw")
-        elif BEATS[c1] == c2:
-            result = f"🏆 {p1['name']} برنده شد!"
-            db.record_result(p1["user_id"], KIND, "win")
-            db.record_result(p2["user_id"], KIND, "loss")
-        else:
-            result = f"🏆 {p2['name']} برنده شد!"
-            db.record_result(p2["user_id"], KIND, "win")
-            db.record_result(p1["user_id"], KIND, "loss")
 
-        text = (
-            f"🎮 {p1['name']} 🆚 {p2['name']}\n\n"
-            f"{p1['name']}: {EMOJI[c1]} {NAMES_FA[c1]}\n"
-            f"{p2['name']}: {EMOJI[c2]} {NAMES_FA[c2]}\n\n"
-            f"{result}"
-        )
+        text = f"🎮 {p1['name']} 🆚 {p2['name']}\n\n{round_summary}\n\n{final_line}"
         await gs.broadcast_custom(context.bot, session, lambda p: (text, None))
         gs.remove_game(game_id)
+        return
+
+    session["round"] += 1
+    session["choices"] = {}
+    keyboard = PICK_KEYBOARD_TEMPLATE(game_id)
+
+    def render(p):
+        text = (
+            f"🎮 {p1['name']} 🆚 {p2['name']} — دست {session['round']} از {TOTAL_ROUNDS}\n\n"
+            f"{round_summary}\n\nانتخاب دست بعد رو بزن 👇"
+        )
+        return text, keyboard
+
+    await gs.broadcast_custom(context.bot, session, render)
