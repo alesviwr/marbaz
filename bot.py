@@ -36,8 +36,7 @@ MENU_GAMES = [
 WELCOME_TEXT = (
     "سلام! 👋 به ربات بازی‌های گروهی خوش اومدی 🎮\n\n"
     "برای دیدن لیست بازی‌ها و شروع بازی از دکمه‌ها استفاده کن، یا /play رو بزن.\n\n"
-    "📊 /score — امتیازات من\n"
-    "🏆 /leaderboard — جدول برترین‌ها\n\n"
+    "📊 /score — امتیازات من\n\n"
     "هر بازی رو که شروع کنی یه لینک دعوت می‌گیری — همون لینک رو برای دوستت بفرست "
     "(تو همین ربات یا هر چت دیگه‌ای)، وقتی روش بزنه با ربات چت خصوصی باز می‌شه و بازی شروع می‌شه."
 )
@@ -118,6 +117,11 @@ async def score(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in config.ADMIN_IDS:
+        await update.message.reply_text("این دستور فقط برای ادمین ربات در دسترسه.")
+        return
+
     game = "rps"
     if context.args:
         mapping = {
