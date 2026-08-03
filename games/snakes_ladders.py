@@ -92,21 +92,23 @@ def _board_image(session):
     return bi.render_snakes_ladders(positions, SNAKES, LADDERS)
 
 
-async def _render_turn(bot, session, game_id, extra_note=""):
+def _dice_keyboard(game_id):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب تاس", callback_data=f"sl_roll_{game_id}")]])
+
+
+def _render_turn(session, game_id, extra_note=""):
+    """Returns (photo_bytesio, caption, keyboard) for each player, so the board
+    re-renders (with moving tokens) and the caption updates on every move."""
     current_id = session["players"][session["turn_idx"]]["user_id"]
     current_name = gs.find_player(session, current_id)["name"]
     note_block = f"{extra_note}\n\n" if extra_note else ""
     caption = f"🐍🪜 {_players_text(session)}\n\n{note_block}نوبت: {current_name}"
 
     def render(p):
-        img = _board_image(session)
-        if p["user_id"] == current_id:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 پرتاب تاس", callback_data=f"sl_roll_{game_id}")]])
-        else:
-            kb = None
-        return img, caption, kb
+        kb = _dice_keyboard(game_id) if p["user_id"] == current_id else None
+        return _board_image(session), caption, kb
 
-    await gs.broadcast_photo(bot, session, render)
+    return render
 
 
 async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,8 +134,9 @@ async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         session["status"] = "playing"
+        session["turn_idx"] = 0
         await query.answer("بازی شروع شد!")
-        await _render_turn(context.bot, session, game_id)
+        await gs.broadcast_photo(context.bot, session, _render_turn(session, game_id))
         return
 
     if data.startswith("sl_roll_"):
@@ -182,4 +185,4 @@ async def sl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         session["turn_idx"] = (session["turn_idx"] + 1) % len(session["players"])
-        await _render_turn(context.bot, session, game_id, extra_note=note)
+        await gs.broadcast_photo(context.bot, session, _render_turn(session, game_id, extra_note=note))

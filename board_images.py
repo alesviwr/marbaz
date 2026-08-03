@@ -85,59 +85,119 @@ def render_connect4(grid):
 
 
 # ------------------------------------------------------------- Snakes & ladders
-SL_LIGHT = (250, 240, 210)
-SL_DARK = (235, 210, 160)
-SL_LINE = (120, 100, 70)
-PLAYER_COLORS = [(52, 120, 219), (231, 76, 60), (46, 170, 90), (241, 196, 15)]
+SL_BORDER = (88, 60, 20)
+SL_LIGHT = (250, 240, 214)
+SL_DARK = (233, 205, 158)
+PLAYER_COLORS = [(46, 120, 210), (224, 70, 60), (46, 168, 88), (236, 178, 24)]
+PLAYER_OUTLINE = (255, 255, 255)
+LADDER_C = (150, 95, 40)
+LADDER_RUNG = (110, 70, 30)
+SNAKE_C = (60, 150, 60)
+
+
+def _cell_xy(n):
+    n0 = n - 1
+    row_from_bottom = n0 // 10
+    col = n0 % 10
+    if row_from_bottom % 2 == 1:
+        col = 9 - col
+    row = 9 - row_from_bottom
+    return col, row
 
 
 def render_snakes_ladders(positions_by_index, snakes, ladders):
     """positions_by_index: list of cell numbers (1..100 or 0), one per player, in
-    player order (used to pick color/offset)."""
+    player order (used to pick color/offset). Draws a polished glossy board once —
+    snakes and ladders are drawn with dimension so it doesn't look like a flat
+    sketch."""
     cell = 56
     size = cell * 10
-    img = Image.new("RGB", (size, size), SL_LIGHT)
+    img = Image.new("RGB", (size, size), SL_BORDER)
     draw = ImageDraw.Draw(img)
-    font = _font(16)
 
-    def cell_xy(n):
-        n0 = n - 1
-        row_from_bottom = n0 // 10
-        col = n0 % 10
-        if row_from_bottom % 2 == 1:
-            col = 9 - col
-        row = 9 - row_from_bottom
-        return col * cell, row * cell
+    # subtle background tint within the board
+    draw.rectangle([0, 0, size, size], fill=(245, 235, 200))
 
+    # checkerboard cells
     for n in range(1, 101):
-        x, y = cell_xy(n)
-        light = ((n - 1) // 10 + (n - 1) % 10) % 2 == 0
-        draw.rectangle([x, y, x + cell, y + cell], fill=SL_LIGHT if light else SL_DARK, outline=(200, 190, 170))
-        draw.text((x + 6, y + 4), str(n), font=font, fill=(90, 75, 50))
+        col, row = _cell_xy(n)
+        x, y = col * cell, row * cell
+        fill = SL_LIGHT if ((n - 1) // 10 + (n - 1) % 10) % 2 == 0 else SL_DARK
+        draw.rectangle([x, y, x + cell, y + cell], fill=fill,
+                       outline=(224, 208, 176))
 
+    # --- ladders first (drawn under the tokens), with vertical rails + rungs ---
+    rail = 5
     for start, end in ladders.items():
-        x1, y1 = cell_xy(start)
-        x2, y2 = cell_xy(end)
-        draw.line([(x1 + cell // 2, y1 + cell // 2), (x2 + cell // 2, y2 + cell // 2)], fill=(46, 150, 90), width=6)
+        sc, sr = _cell_xy(start)
+        ec, er = _cell_xy(end)
+        x1, y1 = sc * cell + cell // 2, sr * cell + cell // 2
+        x2, y2 = ec * cell + cell // 2, er * cell + cell // 2
+        # rail offset perpendicular to the ladder direction
+        dx, dy = (x2 - x1), (y2 - y1)
+        ln = (dx * dx + dy * dy) ** 0.5 or 1
+        off = (dy / ln * 5, -dx / ln * 5)
+        for s in (-1, 1):
+            ax, ay = x1 + off[0] * s, y1 + off[1] * s
+            bx, by = x2 + off[0] * s, y2 + off[1] * s
+            draw.line([(ax, ay), (bx, by)], fill=LADDER_C, width=rail)
+        # rungs between the rails
+        rungs = max(2, int(ln // (cell * 0.9)))
+        for i in range(1, rungs):
+            t = i / rungs
+            rx1 = x1 + off[0] * -1 + (x2 - x1) * t
+            ry1 = y1 + off[1] * -1 + (y2 - y1) * t
+            rx2 = x1 + off[0] * 1 + (x2 - x1) * t
+            ry2 = y1 + off[1] * 1 + (y2 - y1) * t
+            draw.line([(rx1, ry1), (rx2, ry2)], fill=LADDER_RUNG, width=4)
 
+    # --- snakes: wavy body from head cell to tail cell ---
     for start, end in snakes.items():
-        x1, y1 = cell_xy(start)
-        x2, y2 = cell_xy(end)
-        draw.line([(x1 + cell // 2, y1 + cell // 2), (x2 + cell // 2, y2 + cell // 2)], fill=(190, 60, 60), width=6)
+        sc, sr = _cell_xy(start)
+        ec, er = _cell_xy(end)
+        x1, y1 = sc * cell + cell // 2, sr * cell + cell // 2
+        x2, y2 = ec * cell + cell // 2, er * cell + cell // 2
+        # a slight S-curve so it reads as a snake, not a straight line
+        mx, my = (x1 + x2) // 2, (y1 + y2) // 2
+        dxn, dyn = (y2 - y1), -(x2 - x1)
+        nlen = (dxn * dxn + dyn * dyn) ** 0.5 or 1
+        bend = cell * 0.7
+        mx += dxn / nlen * bend * 0.4
+        my += dyn / nlen * bend * 0.4
+        pts = [(x1, y1), (mx, my), (x2, y2)]
+        draw.line(pts, fill=SNAKE_C, width=8, joint="curve")
+        draw.line(pts, fill=(120, 195, 90), width=3, joint="curve")
+        # head dot at the top cell
+        hr = 9
+        draw.ellipse([x1 - hr, y1 - hr, x1 + hr, y1 + hr], fill=SNAKE_C)
+        # eyes
+        for s in (-1, 1):
+            ex = x1 + dxn / nlen * 3 + (x2 - x1) / nlen * s * 3
+            ey = y1 + dyn / nlen * 3
+            draw.ellipse([ex - 2, ey - 2, ex + 2, ey + 2], fill=(30, 80, 30))
 
-    offsets = [(-12, -12), (12, -12), (-12, 12), (12, 12)]
+    # cell numbers (clearer, above everything except the tokens)
+    font = _font(14)
+    for n in range(1, 101):
+        col, row = _cell_xy(n)
+        x, y = col * cell, row * cell
+        draw.text((x + 4, y + 3), str(n), font=font, fill=(120, 100, 70))
+
+    # player tokens with white halo ring so they pop on the board
+    offsets = [(-1, -1), (1, -1), (-1, 1), (1, 1)]
     for i, pos in enumerate(positions_by_index):
         if pos < 1:
             pos = 1
-        x, y = cell_xy(pos)
+        col, row = _cell_xy(pos)
+        x, y = col * cell, row * cell
         ox, oy = offsets[i % 4]
-        cx, cy = x + cell // 2 + ox // 2, y + cell // 2 + oy // 2
-        rad = 11
-        draw.ellipse(
-            [cx - rad, cy - rad, cx + rad, cy + rad],
-            fill=PLAYER_COLORS[i % len(PLAYER_COLORS)],
-            outline=(255, 255, 255),
-            width=2,
-        )
+        cx = x + cell // 2 + ox * 11
+        cy = y + cell // 2 + oy * 11
+        rad = 12
+        draw.ellipse([cx - rad - 2, cy - rad - 2, cx + rad + 2, cy + rad + 2],
+                     fill=PLAYER_OUTLINE)
+        draw.ellipse([cx - rad, cy - rad, cx + rad, cy + rad],
+                     fill=PLAYER_COLORS[i % len(PLAYER_COLORS)],
+                     outline=(255, 255, 255), width=2)
 
     return _to_buf(img)
