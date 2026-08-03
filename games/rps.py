@@ -114,8 +114,22 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     c1, c2 = session["choices"][p1["user_id"]], session["choices"][p2["user_id"]]
 
     if c1 == c2:
-        round_result = "🤝 این دست مساوی شد."
-    elif BEATS[c1] == c2:
+        # مساوی: این دست حساب نمیشه و دوباره هر دو انتخاب می‌کنن
+        session["choices"] = {}
+        keyboard = PICK_KEYBOARD_TEMPLATE(game_id)
+
+        def render(p):
+            text = (
+                f"🎮 {p1['name']} 🆚 {p2['name']} — دست {session['round']} از {TOTAL_ROUNDS}\n\n"
+                f"🤝 این دست مساوی شد ({EMOJI[c1]} {NAMES_FA[c1]} = {EMOJI[c2]} {NAMES_FA[c2]}).\n"
+                f"این دست جایی تو امتیاز نداره — دوباره انتخاب کنید 👇"
+            )
+            return text, keyboard
+
+        await gs.broadcast_custom(context.bot, session, render)
+        return
+
+    if BEATS[c1] == c2:
         round_result = f"🏆 {p1['name']} این دست رو برد."
         session["scores"][p1["user_id"]] += 1
     else:
@@ -129,20 +143,16 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{round_result}\n{_score_line(session)}"
     )
 
-    if session["round"] >= TOTAL_ROUNDS:
-        s1, s2 = session["scores"][p1["user_id"]], session["scores"][p2["user_id"]]
-        if s1 == s2:
-            final_line = "🤝 نتیجه‌ی نهایی بازی مساویه!"
-        else:
-            winner_name = p1["name"] if s1 > s2 else p2["name"]
-            final_line = f"🏆🏆 {winner_name} برنده‌ی نهایی بازیه!"
-            winner_id = p1["user_id"] if s1 > s2 else p2["user_id"]
-            loser_id = p2["user_id"] if s1 > s2 else p1["user_id"]
-            db.record_result(winner_id, KIND, "win")
-            db.record_result(loser_id, KIND, "loss")
-        if s1 == s2:
-            db.record_result(p1["user_id"], KIND, "draw")
-            db.record_result(p2["user_id"], KIND, "draw")
+    s1, s2 = session["scores"][p1["user_id"]], session["scores"][p2["user_id"]]
+
+    # بهترین از ۳: هر کی زودتر به ۲ برد برسه برنده‌ست
+    if s1 >= 2 or s2 >= 2:
+        winner_id = p1["user_id"] if s1 > s2 else p2["user_id"]
+        loser_id = p2["user_id"] if s1 > s2 else p1["user_id"]
+        winner_name = p1["name"] if s1 > s2 else p2["name"]
+        final_line = f"🏆🏆 {winner_name} برنده‌ی نهایی بازیه!"
+        db.record_result(winner_id, KIND, "win")
+        db.record_result(loser_id, KIND, "loss")
 
         text = f"🎮 {p1['name']} 🆚 {p2['name']}\n\n{round_summary}\n\n{final_line}"
         await gs.broadcast_custom(context.bot, session, lambda p: (text, None))

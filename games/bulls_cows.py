@@ -1,7 +1,7 @@
 """Bulls & Cows (گاو و گوسفند): each player picks a secret 4-digit number with
 unique digits, then players take turns guessing the opponent's number. Text-based,
 so it works via plain messages (private chat only) rather than inline buttons."""
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import database as db
@@ -52,7 +52,8 @@ async def bc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "بعد از پیوستنِ دوستت، هر دو نفر باید یه عدد چهار رقمی با ارقام متفاوت "
         "(رقم اول غیر صفر) براش بفرستید تا مخفیانه ثبت بشه."
     )
-    msg = await update.message.reply_text(text)
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 دعوت به بازی", url=link)]])
+    msg = await update.message.reply_text(text, reply_markup=keyboard)
     session["players"][0]["msg_id"] = msg.message_id
 
 
