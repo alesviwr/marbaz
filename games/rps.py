@@ -143,10 +143,10 @@ async def rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{round_result}\n{_score_line(session)}"
     )
 
-    s1, s2 = session["scores"][p1["user_id"]], session["scores"][p2["user_id"]]
-
-    # بهترین از ۳: هر کی زودتر به ۲ برد برسه برنده‌ست
-    if s1 >= 2 or s2 >= 2:
+    # همیشه هر ۳ دست حساب‌شده بازی می‌شه (مساوی‌ها جایی ندارن)؛
+    # برنده بعد از کامل شدنِ هر ۳ دست با جمع امتیازها معلوم میشه
+    if session["round"] >= TOTAL_ROUNDS:
+        s1, s2 = session["scores"][p1["user_id"]], session["scores"][p2["user_id"]]
         winner_id = p1["user_id"] if s1 > s2 else p2["user_id"]
         loser_id = p2["user_id"] if s1 > s2 else p1["user_id"]
         winner_name = p1["name"] if s1 > s2 else p2["name"]
